@@ -416,10 +416,47 @@ function screenPlayers(){leave();
   app.innerHTML=topbar('英文單字冒險 · '+META[G].name)+`
   <div class="stage"><h2 style="margin-top:0">誰要來練習？</h2>
   <div class="grid players">${names.map(n=>`<button class="player" data-n="${esc(n)}">${esc(n)}</button>`).join('')}</div>
-  <div class="row"><input type="text" id="newname" placeholder="輸入名字" maxlength="12"><button class="btn primary" id="add">新增玩家</button></div></div>`;
+  <div class="row"><input type="text" id="newname" placeholder="輸入名字" maxlength="12"><button class="btn primary" id="add">新增玩家</button></div>
+  <div class="row"><button class="btn" id="imp">📂 讀取紀錄檔</button></div><p class="hint" id="impmsg"></p></div>`;
   app.querySelectorAll('.player').forEach(b=>b.onclick=()=>{S.current=b.dataset.n;save();setGrade(P().grade);screenHome();});
   $('#add').onclick=()=>{const n=$('#newname').value.trim();if(!n)return;if(!S.players[n])S.players[n]={box:{},stars:0,grade:G};S.current=n;save();setGrade(P().grade);screenHome();};
   $('#newname').onkeydown=e=>{if(e.key==='Enter')$('#add').click();};
+  $('#imp').onclick=()=>importRecord(msg=>{screenPlayers();$('#impmsg').textContent=msg;});
+}
+/* ---------- record export / import ---------- */
+const CUR={unit:''};
+function exportRecord(){
+  const data={app:'english-word-adventure',version:1,exported:new Date().toISOString(),players:S.players};
+  const blob=new Blob([JSON.stringify(data,null,1)],{type:'application/json'});
+  const d=new Date(),pad=x=>String(x).padStart(2,'0');
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download=`english-word-record_${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}.json`;
+  document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);
+}
+// Merge a record file into this browser: keeps the higher mastery for each word, the higher star count, and all test history.
+function mergeRecord(data){
+  if(!data||data.app!=='english-word-adventure'||typeof data.players!=='object')throw new Error('這不是英文單字冒險的紀錄檔');
+  let added=0,merged=0;
+  for(const [name,p] of Object.entries(data.players)){
+    if(!p||typeof p!=='object')continue;
+    const inc={box:(p.box&&typeof p.box==='object')?p.box:{},stars:+p.stars||0,grade:DATA[p.grade]?p.grade:'g1',history:Array.isArray(p.history)?p.history:[]};
+    const cur=S.players[name];
+    if(!cur){S.players[name]=inc;added++;continue;}
+    merged++;cur.box=cur.box||{};
+    for(const [k,v] of Object.entries(inc.box)){const n=Math.max(0,Math.min(5,+v||0));if(n>(cur.box[k]||0))cur.box[k]=n;}
+    cur.stars=Math.max(cur.stars||0,inc.stars);
+    const seen=new Set((cur.history||[]).map(h=>h.t+'|'+h.mode));
+    cur.history=(cur.history||[]).concat(inc.history.filter(h=>h&&!seen.has(h.t+'|'+h.mode))).sort((a,b)=>a.t-b.t).slice(-1000);
+  }
+  save();
+  return `讀取完成：新增 ${added} 位玩家，合併 ${merged} 位玩家的紀錄。`;
+}
+function importRecord(done){
+  const inp=document.createElement('input');inp.type='file';inp.accept='.json,application/json';
+  inp.onchange=()=>{const f=inp.files[0];if(!f)return;const rd=new FileReader();
+    rd.onload=()=>{let msg;try{msg=mergeRecord(JSON.parse(rd.result));}catch(e){msg='讀取失敗：'+(e.message||'檔案格式不正確');}done(msg);};
+    rd.readAsText(f);};
+  inp.click();
 }
 const MODES=[
  {id:'listen',ic:'👂',t:'聽音選圖',d:'聽發音，選出正確的圖片或單字。'},
@@ -447,6 +484,7 @@ function screenUnits(mode){leave();
   bindBack(screenHome);bindGradeBar(()=>screenUnits(mode));
   app.querySelectorAll('.unit').forEach(b=>b.onclick=()=>{
     const pool=b.dataset.u==='smart'?WORDS:UNITS[+b.dataset.u].words;
+    CUR.unit=b.dataset.u==='smart'?'智慧複習':UNITS[+b.dataset.u].name;
     ({listen:startListen,memory:startMemory,build:startBuild,speak:startSpeak})[mode](pool,b.dataset.u==='smart');});
 }
 
@@ -464,7 +502,8 @@ function runRound(title,items,renderQ,restart){
 }
 function finish(title,results,again){
   const ok=results.filter(Boolean).length,n=results.length;const st=ok/n>=.9?3:ok/n>=.6?2:ok>0?1:0;
-  P().stars=(P().stars||0)+st;save();
+  P().stars=(P().stars||0)+st;
+  P().history=(P().history||[]).concat([{t:Date.now(),g:G,mode:title,unit:CUR.unit,ok,n}]).slice(-1000);save();
   app.innerHTML=topbar(title,true)+`<div class="stage result"><h2>完成了！</h2>
    <div class="stars">${'⭐'.repeat(st)}${'☆'.repeat(3-st)}</div><p class="zh">答對 ${ok} / ${n} 題</p>
    <p class="hint">${st===3?'太厲害了！':st===2?'很棒，再練一次會更好！':'沒關係，多練幾次就會了！'}</p>
@@ -544,7 +583,7 @@ function startBuild(pool){
 }
 
 /* ---------- 4. sentences ---------- */
-function startSent(){
+function startSent(){CUR.unit='句子挑戰';
   const pool=SENT.map(s=>Object.assign(s,{w:byWord[s.ans.toLowerCase()].w}));
   // weight by the answer word's box
   const picks=[];let rest=pool.slice();
@@ -621,18 +660,31 @@ function startSpeak(pool){
 }
 
 /* ---------- parent ---------- */
+function historyTable(){
+  const h=(P().history||[]).slice(-30).reverse();
+  if(!h.length)return '<p class="hint">還沒有紀錄，玩完一回合就會出現。</p>';
+  const pad=x=>String(x).padStart(2,'0');
+  const fmt=t=>{const d=new Date(t);return `${d.getFullYear()}/${pad(d.getMonth()+1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;};
+  return `<table><thead><tr><th>時間</th><th>年級</th><th>模式</th><th>單元</th><th>成績</th></tr></thead><tbody>${h.map(r=>`<tr><td>${fmt(r.t)}</td><td>${esc((META[r.g]||{}).name||'')}</td><td>${esc(r.mode)}</td><td>${esc(r.unit||'')}</td><td>${r.ok} / ${r.n}</td></tr>`).join('')}</tbody></table>`;
+}
 function screenParent(){leave();
   const lv=b=>'★'.repeat(b)+'☆'.repeat(5-b);
   const counts=[0,0,0];WORDS.forEach(w=>{const b=box(w);counts[b>=4?2:b>0?1:0]++;});
   app.innerHTML=topbar('家長檢核頁 · '+META[G].name,true)+`<div class="stage" style="text-align:left">
    <div class="row" style="justify-content:flex-start"><span class="pill">熟練 ${counts[2]}</span><span class="pill">學習中 ${counts[1]}</span><span class="pill">還沒練 ${counts[0]}</span></div>
    <p class="hint">星星代表熟練度（0–5）：第一次就答對 +1，答錯 −2。4 顆星以上算熟練，智慧複習會多出現星星少的字。</p>
+   <h3>測驗紀錄（最近 30 次）</h3>${historyTable()}
+   <div class="note"><b>紀錄備份</b><br>把所有玩家的熟練度、星星和測驗紀錄存成一個檔案，之後可以再讀取回來繼續累積。換電腦或清除瀏覽器資料前，記得先存一份。
+   <div class="row" style="justify-content:flex-start"><button class="btn primary" id="exp">💾 儲存紀錄檔</button><button class="btn" id="imp2">📂 讀取紀錄檔</button></div><span id="impmsg"></span></div>
+   <h2>單字熟練度</h2>
    ${UNITS.map(u=>`<h3>${esc(u.name)}</h3><table><thead><tr><th>#</th><th>English</th><th>拆音</th><th>中文</th><th>熟練度</th></tr></thead><tbody>
    ${u.words.map(w=>`<tr><td>${w.n}</td><td><button class="btn back" data-say="${esc(w.w)}">🔊 ${esc(w.w)}</button></td><td>${colored(w)}</td><td>${esc(w.zh)}</td><td class="lv">${lv(box(w))}</td></tr>`).join('')}
    </tbody></table>`).join('')}
    <div class="note">重設會清除「${esc(S.current)}」在${META[G].name}的單字進度（星星和其他年級不受影響）。<br><button class="btn" id="reset" style="margin-top:8px">重設這個年級的進度</button> <span id="cf"></span></div></div>`;
   bindBack(screenHome);
   app.querySelectorAll('[data-say]').forEach(b=>b.onclick=()=>say(b.dataset.say));
+  $('#exp').onclick=exportRecord;
+  $('#imp2').onclick=()=>importRecord(msg=>{screenParent();$('#impmsg').textContent=msg;});
   $('#reset').onclick=()=>{$('#cf').innerHTML='確定嗎？ <button class="btn" id="yes">確定重設</button>';
     $('#yes').onclick=()=>{const b=P().box;Object.keys(b).forEach(k=>{if(k.startsWith(G+':'))delete b[k];});save();screenParent();};};
 }
